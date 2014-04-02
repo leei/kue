@@ -1,4 +1,4 @@
-# Kue
+# Kue [![Build Status](https://travis-ci.org/LearnBoost/kue.png)](https://travis-ci.org/LearnBoost/kue)
 
   Kue is a priority job queue backed by [redis](http://redis.io), built for [node.js](http://nodejs.org).
 
@@ -6,18 +6,21 @@
 
     $ npm install kue
 
+[![NPM](https://nodei.co/npm/kue.png?downloads=true&stars=true)](https://nodei.co/npm/kue/)
+
 ## Features
 
-  - delayed jobs
-  - job event and progress pubsub
-  - rich integrated UI
-  - infinite scrolling
+  - Delayed jobs
+  - Job event and progress pubsub
+  - Rich integrated UI
+  - Infinite scrolling
   - UI progress indication
-  - job specific logging
-  - powered by Redis
-  - optional retries
-  - full-text search capabilities
+  - Job specific logging
+  - Powered by Redis
+  - Optional retries
+  - Full-text search capabilities
   - RESTful JSON API
+  - Graceful workers shutdown
 
 ## Overview
 
@@ -32,6 +35,7 @@
   - [Processing Jobs](#processing-jobs)
   - [Processing Concurrency](#processing-concurrency)
   - [Updating Progress](#updating-progress)
+  - [Graceful Shutdown](#graceful-shutdown)
   - [Redis Connection Settings](#redis-connection-settings)
   - [User-Interface](#user-interface)
   - [JSON API](#json-api)
@@ -117,7 +121,8 @@ job.progress(frames, totalFrames);
 
  Job-specific events are fired on the `Job` instances via Redis pubsub. The following events are currently supported:
 
-    - `failed` the job has failed
+    - `failed` the job has failed and has no remaining attempts
+    - 'failed attempt' the job has failed, but has remaining attempts yet
     - `complete` the job has completed
     - `promotion` the job (when delayed) is now queued
     - `progress` the job's progress ranging from 0-100
@@ -142,7 +147,7 @@ job.on('complete', function(){
 
 ### Queue Events
 
- Queue-level events are currently provide access to the job-level events previously mentioned, however scoped to the `Queue` instance to to apply logic at a "global" level. An example of this is removing completed jobs:
+ Queue-level events provide access to the job-level events previously mentioned, however scoped to the `Queue` instance to to apply logic at a "global" level. An example of this is removing completed jobs:
  
 ```js
 jobs.on('job complete', function(id){
@@ -167,12 +172,12 @@ var email = jobs.create('email', {
     title: 'Account renewal required'
   , to: 'tj@learnboost.com'
   , template: 'renewal-email'
-}).delay(minute)
+}).delay(milliseconds)
   .priority('high')
   .save();
 ```
 
-When using delayed jobs, we must also check the delayed jobs with a timer, promoting them if the scheduled delay has been exceeded. This `setInterval` is defined within `Queue#promote(ms)`, defaulting to a check every 5 seconds.
+When using delayed jobs, we must also check the delayed jobs with a timer, promoting them if the scheduled delay has been exceeded. This `setInterval` is defined within `Queue#promote(ms,limit)`, defaulting to a check of top 200 jobs every 5 seconds.
 
 ```js
 jobs.promote();
@@ -182,7 +187,8 @@ jobs.promote();
 
  Processing jobs is simple with Kue. First create a `Queue` instance much like we do for creating jobs, providing us access to redis etc, then invoke `jobs.process()` with the associated type.
 
- In the following example we pass the callback `done` to `email`, if this function responds with an error it will be displayed in the UI and the job will be marked as a failure.
+ In the following example we pass the callback `done` to `email`, When an error occurs we invoke `done(err)` to tell Kue something happened, otherwise we invoke `done()` only when the job is complete.
+ if this function responds with an error it will be displayed in the UI and the job will be marked as a failure.
 
 ```js
 var kue = require('kue')
@@ -214,7 +220,7 @@ jobs.create('slideshow pdf', {
 });
 ```
 
-  We can access this same arbitrary data within a separate process while processing, via the `job.data` property. In the example we render each slide one-by-one, updating the job's log and process. When an error occurs we invoke `done(err)` to tell Kue something happened, otherwise we invoke `done()` only when the job is complete.
+  We can access this same arbitrary data within a separate process while processing, via the `job.data` property. In the example we render each slide one-by-one, updating the job's log and process.
 
 ```js
 jobs.process('slideshow pdf', 5, function(job, done){
@@ -236,9 +242,43 @@ jobs.process('slideshow pdf', 5, function(job, done){
 });
 ```
 
+### Graceful Shutdown
+
+  As of Kue 0.7.0, a `Queue#shutdown(fn, timeout)` is added which signals all workers to stop processing after
+  their current active job is done. Workers will wait `timeout` milliseconds for their active job's done to be called
+  or mark the active job `failed` with shutdown error reason. When all workers tell Kue they are stopped `fn` is called.
+
+```javascript
+var queue = require('kue').createQueue();
+
+process.once( 'SIGTERM', function ( sig ) {
+  queue.shutdown(function(err) {
+    console.log( 'Kue is shut down.', err||'' );
+    process.exit( 0 );
+  }, 5000 );
+});
+```
+
 ## Redis Connection Settings
 
-  By default, Kue will connect to Redis using the client default settings (port defaults to `6389`, host defaults to `127.0.0.1`).  Redis client connection settings can be set by overriding the `kue.redis.createClient` function.
+  By default, Kue will connect to Redis using the client default settings (port defaults to `6379`, host defaults to `127.0.0.1`).
+  `Queue#createQueue(options)` accepts redis connection options in `options.redis` key.
+
+  ```javascript
+  var kue = require('kue');
+  q = kue.createQueue({
+    redis: {
+      port: 1234,
+      host: '10.0.50.20',
+      auth: 'password',
+      options: {
+        // look for more redis options in [node_redis](https://github.com/mranney/node_redis)
+      }
+    }
+  });
+  ```
+
+  For backward compatibility to `Kue < 0.7.0`, monkey-patch-styled Redis client connection settings can be set by overriding the `kue.redis.createClient` function.
 
   For example, to create a Redis client that connects to `192.168.1.2` on port `1234` that requires authentication, use the following:
 
@@ -280,6 +320,15 @@ kue.app.set('title', 'My Application');
 
 ```js
 ["5", "7", "10"]
+```
+  You may disable search indexes in `Kue >= 0.7.0` for memory optimization or to avoid probable
+  memory leak reported in issue list:
+
+```javascript
+var kue = require('kue');
+q = kue.createQueue({
+    disableSearch: true
+});
 ```
 
 ### GET /stats
@@ -357,7 +406,7 @@ kue.app.set('title', 'My Application');
 
 ## Parallel Processing With Cluster
 
- The example below shows how you may use [Cluster](http://learnboost.github.com/cluster) to spread the job processing load across CPUs. By default cluster will create one worker per CPU, however you can specify this number via `.set('workers', N)`.
+ The example below shows how you may use [Cluster](http://nodejs.org/api/cluster.html) to spread the job processing load across CPUs. Please see [Cluster module's documentation](http://nodejs.org/api/cluster.html) for more detailed examples on using it.
  
  When cluster `.isMaster` the file is being executed in context of the master process, in which case you may perform tasks that you only want once, such as starting the web app bundled with Kue. The logic in the `else` block is executed _per worker_. 
 
@@ -366,40 +415,31 @@ var kue = require('kue')
   , cluster = require('cluster')
   , jobs = kue.createQueue();
 
-cluster = cluster()
-  .set('workers', 8)
-  .use(cluster.debug())
-  .start();
+var clusterWorkerSize = require('os').cpus().length;
 
 if (cluster.isMaster) {
   kue.app.listen(3000);
+  for (var i = 0; i < clusterWorkerSize; i++) {
+    cluster.fork();
+  }
 } else {
-  jobs.process('email', function(job, done){
+  jobs.process('email', 10, function(job, done){
     var pending = 5
       , total = pending;
 
-    setInterval(function(){
+    var interval = setInterval(function(){
       job.log('sending!');
       job.progress(total - pending, total);
       --pending || done();
+      pending || clearInterval(interval);
     }, 1000);
   });
 }
 ```
 
-running this example you'll see the following output:
+This will create an `email` job processor (worker) per each of your machine CPU cores, with each you can handle 10 concurrent email jobs, leading to total `10 * N` concurrent email jobs processed in your `N` core machine.
 
-    $ node kue-example
-    info - master started
-    info - worker 0 spawned
-    info - worker 1 spawned
-    info - worker 2 spawned
-    info - listening for connections
-    info - worker 2 connected
-    info - worker 1 connected
-    info - worker 0 connected
-
-now when you visit Kue's UI in the browser you'll see that jobs are being processed roughly 8 times faster! (if you have 8 cores).
+Now when you visit Kue's UI in the browser you'll see that jobs are being processed roughly `N` times faster! (if you have `N` cores).
 
 ## Securing Kue
 
@@ -415,7 +455,7 @@ app.listen(3000);
 ## Screencasts
 
   - [Introduction](http://www.screenr.com/oyNs) to Kue
-  - API [walkthrough](http://nodetuts.com/tutorials/27-kue-jobs.html#video) to Kue
+  - API [walkthrough](http://vimeo.com/26963384) to Kue
 
 ## License 
 
